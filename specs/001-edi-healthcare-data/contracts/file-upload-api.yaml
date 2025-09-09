@@ -1,0 +1,219 @@
+openapi: 3.0.3
+info:
+  title: EDI File Upload API (POC)
+  description: Simplified API for uploading SmithRx claims files for POC
+  version: 0.1.0-poc
+  
+servers:
+  - url: http://localhost:8000/v1
+    description: POC Development server
+
+security:
+  - BearerAuth: []
+
+paths:
+  /files/upload:
+    post:
+      summary: Upload EDI file and optional Excel field definitions
+      description: Upload raw EDI flat files with companion Excel specifications
+      operationId: uploadEdiFile
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required:
+                - edi_file
+                - file_type
+                - project_id
+              properties:
+                edi_file:
+                  type: string
+                  format: binary
+                  description: EDI flat file
+                excel_definitions:
+                  type: string
+                  format: binary
+                  description: Excel field definitions (optional)
+                file_type:
+                  type: string
+                  enum: [834_enrollment, smithrx_claims, common_census, custom]
+                  description: Type of EDI file
+                project_id:
+                  type: string
+                  format: uuid
+                  description: Project/client identifier
+                encoding:
+                  type: string
+                  enum: [ASCII, EBCDIC, UTF-8]
+                  default: ASCII
+                  description: File encoding
+                edi_version:
+                  type: string
+                  enum: ['4010', '5010']
+                  description: EDI version (auto-detected if not provided)
+      responses:
+        '201':
+          description: File uploaded successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FileUploadResponse'
+        '400':
+          description: Invalid file format or missing required fields
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '413':
+          description: File too large (max 1GB)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: File format validation failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /files/{file_id}/status:
+    get:
+      summary: Get file processing status
+      description: Check the current processing status of an uploaded file
+      operationId: getFileStatus
+      parameters:
+        - name: file_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: EDI file identifier
+      responses:
+        '200':
+          description: File status retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FileStatusResponse'
+        '404':
+          description: File not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      
+  schemas:
+    FileUploadResponse:
+      type: object
+      required:
+        - file_id
+        - filename
+        - file_type
+        - upload_timestamp
+        - status
+      properties:
+        file_id:
+          type: string
+          format: uuid
+          description: Unique file identifier
+        filename:
+          type: string
+          description: Original filename
+        file_type:
+          type: string
+          enum: [834_enrollment, smithrx_claims, common_census, custom]
+        file_size:
+          type: integer
+          description: File size in bytes
+        upload_timestamp:
+          type: string
+          format: date-time
+          description: Upload timestamp
+        status:
+          type: string
+          enum: [uploaded, parsing, parsed, failed]
+          description: Current processing status
+        content_hash:
+          type: string
+          description: SHA-256 hash for integrity
+        field_definitions_count:
+          type: integer
+          description: Number of field definitions extracted (if Excel provided)
+        estimated_processing_time:
+          type: string
+          description: Human-readable processing time estimate
+          
+    FileStatusResponse:
+      type: object
+      required:
+        - file_id
+        - status
+        - last_updated
+      properties:
+        file_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [uploaded, parsing, parsed, failed, archived]
+        last_updated:
+          type: string
+          format: date-time
+        progress_percentage:
+          type: number
+          minimum: 0
+          maximum: 100
+          description: Processing progress
+        records_count:
+          type: integer
+          description: Total records found in file
+        field_definitions_count:
+          type: integer
+          description: Field definitions extracted
+        error_message:
+          type: string
+          description: Error details if status is failed
+        processing_logs:
+          type: array
+          items:
+            type: object
+            properties:
+              timestamp:
+                type: string
+                format: date-time
+              level:
+                type: string
+                enum: [INFO, WARNING, ERROR]
+              message:
+                type: string
+                
+    ErrorResponse:
+      type: object
+      required:
+        - error_code
+        - error_message
+      properties:
+        error_code:
+          type: string
+          description: Machine-readable error code
+        error_message:
+          type: string
+          description: Human-readable error message
+        details:
+          type: object
+          description: Additional error context
+        correlation_id:
+          type: string
+          format: uuid
+          description: Request correlation ID for debugging

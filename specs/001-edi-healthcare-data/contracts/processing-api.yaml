@@ -1,0 +1,512 @@
+openapi: 3.0.3
+info:
+  title: Data Processing API
+  description: API for executing data processing jobs and generating staging files
+  version: 0.1.0
+
+servers:
+  - url: https://api.edi-pipeline.vba.com/v1
+    description: Production server
+  - url: http://localhost:8000/v1
+    description: Development server
+
+security:
+  - BearerAuth: []
+
+paths:
+  /processing/jobs:
+    post:
+      summary: Start data processing job
+      description: Process EDI file using approved mapping specification
+      operationId: startProcessingJob
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - edi_file_id
+                - mapping_spec_id
+                - job_type
+              properties:
+                edi_file_id:
+                  type: string
+                  format: uuid
+                mapping_spec_id:
+                  type: string
+                  format: uuid
+                job_type:
+                  type: string
+                  enum: [test_run, full_processing, replay]
+                output_formats:
+                  type: array
+                  items:
+                    type: string
+                    enum: [json, csv, parquet]
+                  default: [json, csv]
+                generate_sql_artifacts:
+                  type: boolean
+                  default: true
+                batch_size:
+                  type: integer
+                  minimum: 1000
+                  maximum: 100000
+                  default: 10000
+                  description: Records per processing batch
+                priority:
+                  type: string
+                  enum: [low, normal, high, critical]
+                  default: normal
+                notification_webhook:
+                  type: string
+                  format: uri
+                  description: URL to notify when job completes
+      responses:
+        '202':
+          description: Processing job queued successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProcessingJobResponse'
+        '400':
+          description: Invalid request parameters
+        '404':
+          description: EDI file or mapping not found
+        '409':
+          description: Mapping not approved for full processing
+
+  /processing/jobs/{job_id}:
+    get:
+      summary: Get processing job status
+      description: Retrieve current status and progress of processing job
+      operationId: getProcessingJobStatus
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Job status retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProcessingJobStatus'
+        '404':
+          description: Job not found
+
+    delete:
+      summary: Cancel processing job
+      description: Cancel a queued or running processing job
+      operationId: cancelProcessingJob
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Job cancelled successfully
+        '400':
+          description: Job cannot be cancelled (already completed)
+        '404':
+          description: Job not found
+
+  /processing/jobs/{job_id}/replay:
+    post:
+      summary: Replay failed processing job
+      description: Re-run processing job with exact same parameters and data
+      operationId: replayProcessingJob
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                replay_reason:
+                  type: string
+                  description: Reason for replay
+                notification_webhook:
+                  type: string
+                  format: uri
+      responses:
+        '202':
+          description: Replay job queued successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProcessingJobResponse'
+        '400':
+          description: Original job cannot be replayed
+        '404':
+          description: Original job not found
+
+  /processing/jobs/{job_id}/results:
+    get:
+      summary: Get processing job results
+      description: Retrieve validation results and generated files
+      operationId: getProcessingJobResults
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: include_sample_data
+          in: query
+          schema:
+            type: boolean
+            default: false
+          description: Include sample output records
+      responses:
+        '200':
+          description: Job results retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProcessingJobResults'
+        '404':
+          description: Job not found or not completed
+
+  /processing/staging-files/{file_id}/download:
+    get:
+      summary: Download staging file
+      description: Download generated staging file for SSIS consumption
+      operationId: downloadStagingFile
+      parameters:
+        - name: file_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: File download
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '404':
+          description: File not found or expired
+
+  /processing/sql-artifacts/{artifact_id}:
+    get:
+      summary: Get SQL artifact
+      description: Retrieve generated SQL script or stored procedure
+      operationId: getSqlArtifact
+      parameters:
+        - name: artifact_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: SQL artifact retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SqlArtifact'
+            text/plain:
+              schema:
+                type: string
+                description: Raw SQL content
+        '404':
+          description: Artifact not found
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+    ProcessingJobResponse:
+      type: object
+      required:
+        - job_id
+        - status
+        - estimated_completion_time
+      properties:
+        job_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [queued, running, completed, failed, cancelled]
+        estimated_completion_time:
+          type: string
+          format: date-time
+        estimated_duration_minutes:
+          type: integer
+        queue_position:
+          type: integer
+          description: Position in processing queue
+
+    ProcessingJobStatus:
+      type: object
+      required:
+        - job_id
+        - status
+        - start_timestamp
+      properties:
+        job_id:
+          type: string
+          format: uuid
+        job_type:
+          type: string
+          enum: [test_run, full_processing, replay]
+        status:
+          type: string
+          enum: [queued, running, completed, failed, cancelled]
+        start_timestamp:
+          type: string
+          format: date-time
+        end_timestamp:
+          type: string
+          format: date-time
+        progress_percentage:
+          type: number
+          minimum: 0
+          maximum: 100
+        records_processed:
+          type: integer
+        records_total:
+          type: integer
+        records_failed:
+          type: integer
+        current_stage:
+          type: string
+          enum: [parsing, validating, transforming, generating_outputs, finalizing]
+        error_message:
+          type: string
+        performance_metrics:
+          $ref: '#/components/schemas/PerformanceMetrics'
+        triggered_by:
+          type: string
+          format: uuid
+        replay_of_job_id:
+          type: string
+          format: uuid
+
+    ProcessingJobResults:
+      type: object
+      required:
+        - job_id
+        - validation_scorecard
+        - output_files
+      properties:
+        job_id:
+          type: string
+          format: uuid
+        validation_scorecard:
+          $ref: '#/components/schemas/ValidationScorecard'
+        validation_results:
+          type: array
+          items:
+            $ref: '#/components/schemas/ValidationResult'
+        output_files:
+          type: array
+          items:
+            $ref: '#/components/schemas/StagingFile'
+        sql_artifacts:
+          type: array
+          items:
+            $ref: '#/components/schemas/SqlArtifact'
+        sample_output_records:
+          type: array
+          items:
+            type: object
+          description: Sample transformed records (if requested)
+        processing_summary:
+          $ref: '#/components/schemas/ProcessingSummary'
+
+    StagingFile:
+      type: object
+      required:
+        - file_id
+        - file_format
+        - record_count
+      properties:
+        file_id:
+          type: string
+          format: uuid
+        file_format:
+          type: string
+          enum: [json, csv, parquet]
+        file_size:
+          type: integer
+          description: Size in bytes
+        record_count:
+          type: integer
+        schema_version:
+          type: string
+        generation_timestamp:
+          type: string
+          format: date-time
+        checksum:
+          type: string
+          description: File integrity hash
+        download_url:
+          type: string
+          format: uri
+          description: Temporary download URL
+        expiration_date:
+          type: string
+          format: date-time
+
+    SqlArtifact:
+      type: object
+      required:
+        - artifact_id
+        - artifact_type
+      properties:
+        artifact_id:
+          type: string
+          format: uuid
+        artifact_type:
+          type: string
+          enum: [table_ddl, stored_procedure, bulk_insert, index_script]
+        sql_content:
+          type: string
+          description: The SQL script content
+        target_database:
+          type: string
+        target_schema:
+          type: string
+        dependencies:
+          type: array
+          items:
+            type: string
+          description: Required tables/procedures
+        execution_order:
+          type: integer
+        is_idempotent:
+          type: boolean
+        generation_timestamp:
+          type: string
+          format: date-time
+
+    PerformanceMetrics:
+      type: object
+      properties:
+        processing_time_seconds:
+          type: number
+        records_per_second:
+          type: number
+        memory_usage_mb:
+          type: number
+        cpu_usage_percentage:
+          type: number
+        disk_io_mb:
+          type: number
+        network_io_mb:
+          type: number
+
+    ProcessingSummary:
+      type: object
+      properties:
+        total_records_input:
+          type: integer
+        total_records_output:
+          type: integer
+        records_transformed_successfully:
+          type: integer
+        records_failed_validation:
+          type: integer
+        records_skipped:
+          type: integer
+        data_quality_issues:
+          type: integer
+        business_rule_violations:
+          type: integer
+        calculated_field_errors:
+          type: integer
+        processing_duration_minutes:
+          type: number
+        sla_compliance:
+          type: boolean
+          description: Whether processing completed within SLA
+
+    ValidationScorecard:
+      type: object
+      properties:
+        overall_score:
+          type: number
+          minimum: 0.0
+          maximum: 100.0
+        completeness_score:
+          type: number
+          minimum: 0.0
+          maximum: 100.0
+        accuracy_score:
+          type: number
+          minimum: 0.0
+          maximum: 100.0
+        consistency_score:
+          type: number
+          minimum: 0.0
+          maximum: 100.0
+        calculated_field_score:
+          type: number
+          minimum: 0.0
+          maximum: 100.0
+        critical_failures:
+          type: integer
+        warnings:
+          type: integer
+        recommendations:
+          type: array
+          items:
+            type: string
+
+    ValidationResult:
+      type: object
+      required:
+        - validation_type
+        - field_name
+        - success_rate
+      properties:
+        validation_type:
+          type: string
+          enum: [data_type, field_length, required_field, calculated_field, business_rule]
+        field_name:
+          type: string
+        rule_name:
+          type: string
+        total_records:
+          type: integer
+        passed_records:
+          type: integer
+        failed_records:
+          type: integer
+        success_rate:
+          type: number
+          minimum: 0.0
+          maximum: 100.0
+        severity:
+          type: string
+          enum: [info, warning, error, critical]
+        sample_failures:
+          type: array
+          items:
+            type: object
+        remediation_suggestion:
+          type: string

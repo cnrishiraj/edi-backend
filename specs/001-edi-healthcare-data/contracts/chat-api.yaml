@@ -1,0 +1,289 @@
+openapi: 3.0.3
+info:
+  title: AI Chat API
+  description: LlamaIndex-powered chat interface for EDI file exploration
+  version: 0.1.0-poc
+
+servers:
+  - url: http://localhost:8000/v1
+    description: Development server
+
+security:
+  - BearerAuth: []
+
+paths:
+  /chat/stream:
+    post:
+      summary: Stream AI chat responses about uploaded files
+      description: Chat with LlamaIndex about uploaded EDI file data
+      operationId: chatStream
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - message
+                - file_id
+              properties:
+                message:
+                  type: string
+                  description: User's question about the file
+                  example: "How many claims are in this SmithRx file?"
+                file_id:
+                  type: string
+                  format: uuid
+                  description: EDI file to query about
+                conversation_id:
+                  type: string
+                  format: uuid
+                  description: Continue existing conversation
+                include_context:
+                  type: boolean
+                  default: true
+                  description: Include file metadata in context
+      responses:
+        '200':
+          description: Streaming chat response
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: Server-sent events with chat response chunks
+              examples:
+                streaming_response:
+                  summary: Example streaming response
+                  value: |
+                    data: {"type": "start", "conversation_id": "conv-123"}
+                    
+                    data: {"type": "chunk", "content": "Looking at your SmithRx claims file"}
+                    
+                    data: {"type": "chunk", "content": ", I can see there are "}
+                    
+                    data: {"type": "chunk", "content": "1,247 total claims "}
+                    
+                    data: {"type": "chunk", "content": "in this dataset."}
+                    
+                    data: {"type": "end", "total_tokens": 42}
+        '400':
+          description: Invalid request or file not found
+        '404':
+          description: File not indexed or processed yet
+
+  /chat/conversations:
+    get:
+      summary: Get chat conversation history
+      description: Retrieve chat history for a file
+      operationId: getConversations
+      parameters:
+        - name: file_id
+          in: query
+          schema:
+            type: string
+            format: uuid
+          description: Filter by file ID
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+            minimum: 1
+            maximum: 100
+      responses:
+        '200':
+          description: Conversation history retrieved
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  conversations:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Conversation'
+                  total:
+                    type: integer
+
+    post:
+      summary: Start new conversation
+      description: Initialize new chat conversation for a file
+      operationId: startConversation
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - file_id
+              properties:
+                file_id:
+                  type: string
+                  format: uuid
+                title:
+                  type: string
+                  description: Optional conversation title
+                  example: "SmithRx Claims Analysis"
+      responses:
+        '201':
+          description: Conversation started
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Conversation'
+
+  /chat/index/{file_id}:
+    post:
+      summary: Index file for AI chat
+      description: Prepare uploaded file for LlamaIndex querying
+      operationId: indexFile
+      parameters:
+        - name: file_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                chunk_size:
+                  type: integer
+                  default: 1024
+                  description: Text chunk size for indexing
+                include_metadata:
+                  type: boolean
+                  default: true
+                  description: Include file metadata in index
+      responses:
+        '202':
+          description: Indexing started
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  job_id:
+                    type: string
+                    format: uuid
+                  estimated_completion:
+                    type: string
+                    format: date-time
+                  status:
+                    type: string
+                    enum: [indexing, completed, failed]
+        '400':
+          description: File not processed or invalid format
+        '404':
+          description: File not found
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+    Conversation:
+      type: object
+      required:
+        - id
+        - file_id
+        - created_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        file_id:
+          type: string
+          format: uuid
+        title:
+          type: string
+          example: "SmithRx Claims Analysis"
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        messages:
+          type: array
+          items:
+            $ref: '#/components/schemas/ChatMessage'
+        metadata:
+          type: object
+          properties:
+            total_messages:
+              type: integer
+            file_info:
+              type: object
+              properties:
+                filename:
+                  type: string
+                record_count:
+                  type: integer
+                file_size:
+                  type: integer
+
+    ChatMessage:
+      type: object
+      required:
+        - id
+        - role
+        - content
+        - timestamp
+      properties:
+        id:
+          type: string
+          format: uuid
+        role:
+          type: string
+          enum: [user, assistant, system]
+        content:
+          type: string
+        timestamp:
+          type: string
+          format: date-time
+        metadata:
+          type: object
+          properties:
+            tokens_used:
+              type: integer
+            response_time_ms:
+              type: integer
+            confidence_score:
+              type: number
+              minimum: 0.0
+              maximum: 1.0
+            sources:
+              type: array
+              items:
+                type: string
+              description: File sections used to generate response
+
+    StreamChunk:
+      type: object
+      required:
+        - type
+      properties:
+        type:
+          type: string
+          enum: [start, chunk, end, error]
+        content:
+          type: string
+          description: Text chunk for type 'chunk'
+        conversation_id:
+          type: string
+          format: uuid
+          description: Present for type 'start'
+        total_tokens:
+          type: integer
+          description: Present for type 'end'
+        error_message:
+          type: string
+          description: Present for type 'error'

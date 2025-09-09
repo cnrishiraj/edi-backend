@@ -1,0 +1,407 @@
+openapi: 3.0.3
+info:
+  title: Mapping Specification API
+  description: API for managing field mapping specifications and version control
+  version: 0.1.0
+
+servers:
+  - url: https://api.edi-pipeline.vba.com/v1
+    description: Production server
+  - url: http://localhost:8000/v1
+    description: Development server
+
+security:
+  - BearerAuth: []
+
+paths:
+  /mappings/generate:
+    post:
+      summary: Generate initial mapping specification
+      description: Auto-generate mapping from EDI file fields to VBA schema
+      operationId: generateMapping
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - edi_file_id
+                - target_schema_version
+              properties:
+                edi_file_id:
+                  type: string
+                  format: uuid
+                  description: Source EDI file identifier
+                target_schema_version:
+                  type: string
+                  description: VBA schema version to map to
+                confidence_threshold:
+                  type: number
+                  minimum: 0.0
+                  maximum: 1.0
+                  default: 0.7
+                  description: Minimum confidence for auto-mapping
+                use_fuzzy_matching:
+                  type: boolean
+                  default: true
+                  description: Enable fuzzy string matching
+      responses:
+        '201':
+          description: Mapping generated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MappingSpecification'
+        '400':
+          description: Invalid request parameters
+        '404':
+          description: EDI file not found or not parsed
+
+  /mappings/{mapping_id}:
+    get:
+      summary: Get mapping specification
+      description: Retrieve a specific mapping specification
+      operationId: getMapping
+      parameters:
+        - name: mapping_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Mapping retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MappingSpecification'
+        '404':
+          description: Mapping not found
+
+    put:
+      summary: Update mapping specification
+      description: Update field mappings and create new version
+      operationId: updateMapping
+      parameters:
+        - name: mapping_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MappingUpdateRequest'
+      responses:
+        '200':
+          description: Mapping updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MappingSpecification'
+        '400':
+          description: Invalid mapping rules
+        '404':
+          description: Mapping not found
+        '409':
+          description: Version conflict
+
+  /mappings/{mapping_id}/test:
+    post:
+      summary: Test mapping with sample data
+      description: Process sample records using current mapping specification
+      operationId: testMapping
+      parameters:
+        - name: mapping_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                sample_size:
+                  type: integer
+                  minimum: 10
+                  maximum: 1000
+                  default: 100
+                  description: Number of records to test
+                validation_rules:
+                  type: array
+                  items:
+                    type: string
+                  description: Additional validation rules to apply
+      responses:
+        '200':
+          description: Test completed successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TestResults'
+        '400':
+          description: Invalid test parameters
+        '404':
+          description: Mapping not found
+
+  /mappings/{mapping_id}/approve:
+    post:
+      summary: Approve mapping for production use
+      description: Mark mapping as approved and ready for full processing
+      operationId: approveMapping
+      parameters:
+        - name: mapping_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                approval_notes:
+                  type: string
+                  description: Optional approval notes
+                force_approval:
+                  type: boolean
+                  default: false
+                  description: Approve even with validation warnings
+      responses:
+        '200':
+          description: Mapping approved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MappingSpecification'
+        '400':
+          description: Mapping has blocking issues
+        '404':
+          description: Mapping not found
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+    MappingSpecification:
+      type: object
+      required:
+        - id
+        - version
+        - edi_file_id
+        - status
+        - created_timestamp
+      properties:
+        id:
+          type: string
+          format: uuid
+        version:
+          type: string
+          pattern: '^\d+\.\d+\.\d+$'
+          description: Semantic version
+        edi_file_id:
+          type: string
+          format: uuid
+        target_schema_version:
+          type: string
+        status:
+          type: string
+          enum: [draft, testing, approved, deprecated]
+        created_timestamp:
+          type: string
+          format: date-time
+        created_by:
+          type: string
+          format: uuid
+        approval_timestamp:
+          type: string
+          format: date-time
+        approved_by:
+          type: string
+          format: uuid
+        confidence_score:
+          type: number
+          minimum: 0.0
+          maximum: 1.0
+        field_mappings:
+          type: array
+          items:
+            $ref: '#/components/schemas/FieldMapping'
+        validation_summary:
+          $ref: '#/components/schemas/ValidationSummary'
+
+    FieldMapping:
+      type: object
+      required:
+        - source_field_name
+        - target_field_name
+        - transformation_type
+      properties:
+        source_field_name:
+          type: string
+        target_field_name:
+          type: string
+        transformation_type:
+          type: string
+          enum: [direct, calculated, constant, conditional]
+        transformation_rule:
+          type: object
+          description: Transformation logic specific to type
+        confidence_score:
+          type: number
+          minimum: 0.0
+          maximum: 1.0
+        manual_override:
+          type: boolean
+        validation_rules:
+          type: array
+          items:
+            type: string
+        is_required_match:
+          type: boolean
+
+    MappingUpdateRequest:
+      type: object
+      properties:
+        field_mappings:
+          type: array
+          items:
+            $ref: '#/components/schemas/FieldMapping'
+        update_notes:
+          type: string
+        version_increment:
+          type: string
+          enum: [patch, minor, major]
+          default: patch
+
+    TestResults:
+      type: object
+      required:
+        - job_id
+        - records_tested
+        - overall_success_rate
+      properties:
+        job_id:
+          type: string
+          format: uuid
+        records_tested:
+          type: integer
+        records_passed:
+          type: integer
+        records_failed:
+          type: integer
+        overall_success_rate:
+          type: number
+          minimum: 0.0
+          maximum: 100.0
+        validation_results:
+          type: array
+          items:
+            $ref: '#/components/schemas/ValidationResult'
+        sample_outputs:
+          type: array
+          items:
+            type: object
+          description: Sample transformed records
+        scorecard:
+          $ref: '#/components/schemas/ValidationScorecard'
+
+    ValidationResult:
+      type: object
+      required:
+        - validation_type
+        - field_name
+        - success_rate
+      properties:
+        validation_type:
+          type: string
+          enum: [data_type, field_length, required_field, calculated_field, business_rule]
+        field_name:
+          type: string
+        rule_name:
+          type: string
+        total_records:
+          type: integer
+        passed_records:
+          type: integer
+        failed_records:
+          type: integer
+        success_rate:
+          type: number
+          minimum: 0.0
+          maximum: 100.0
+        severity:
+          type: string
+          enum: [info, warning, error, critical]
+        sample_failures:
+          type: array
+          items:
+            type: object
+        remediation_suggestion:
+          type: string
+
+    ValidationScorecard:
+      type: object
+      properties:
+        overall_score:
+          type: number
+          minimum: 0.0
+          maximum: 100.0
+        completeness_score:
+          type: number
+          minimum: 0.0
+          maximum: 100.0
+        accuracy_score:
+          type: number
+          minimum: 0.0
+          maximum: 100.0
+        consistency_score:
+          type: number
+          minimum: 0.0
+          maximum: 100.0
+        calculated_field_score:
+          type: number
+          minimum: 0.0
+          maximum: 100.0
+        critical_failures:
+          type: integer
+        warnings:
+          type: integer
+        recommendations:
+          type: array
+          items:
+            type: string
+
+    ValidationSummary:
+      type: object
+      properties:
+        total_fields_mapped:
+          type: integer
+        high_confidence_mappings:
+          type: integer
+        manual_review_required:
+          type: integer
+        unmapped_source_fields:
+          type: array
+          items:
+            type: string
+        unmapped_target_fields:
+          type: array
+          items:
+            type: string
