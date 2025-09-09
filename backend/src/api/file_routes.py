@@ -16,13 +16,15 @@ router = APIRouter(prefix="/files", tags=["files"])
 @router.post("/upload")
 async def upload_file(
     file: UploadFile = File(...),
-    project_id: Optional[str] = Form(default=None)
+    project_id: Optional[str] = Form(default=None),
+    companion_docs: Optional[UploadFile] = File(None)
 ):
     """
-    Upload and process a file
+    Upload and process a file with optional companion documentation
     
-    - **file**: The file to upload (multipart/form-data)
+    - **file**: The file to upload (multipart/form-data) 
     - **project_id**: Optional project ID for file ownership
+    - **companion_docs**: Optional Excel file with field definitions and mappings
     
     Returns the created file record with processing started in background
     """
@@ -46,6 +48,12 @@ async def upload_file(
                 detail="File size exceeds 10MB limit"
             )
         
+        # Process companion docs if provided
+        companion_docs_content = None
+        if companion_docs:
+            companion_content = await companion_docs.read()
+            companion_docs_content = BytesIO(companion_content)
+        
         # Get file service
         file_service = get_file_service()
         
@@ -55,7 +63,7 @@ async def upload_file(
             filename=file.filename or f"upload_{uuid.uuid4().hex[:8]}{file_extension}",
             file_type=FileType.SMITHRX_CLAIMS,  # Default to SmithRx claims
             project_id=project_id or str(uuid.uuid4()),
-            excel_definitions=None
+            excel_definitions=companion_docs_content
         )
         
         if not result['success']:
@@ -244,4 +252,76 @@ async def get_file_for_chat(file_id: str):
         raise HTTPException(
             status_code=500,
             detail=f"Failed to get file for chat: {str(e)}"
+        )
+
+
+@router.get("/{file_id}/extract-json")
+async def extract_json_data(
+    file_id: str,
+    include_metadata: bool = True,
+    format_type: str = "structured"
+):
+    """
+    Extract parsed file data as structured JSON
+    
+    - **file_id**: UUID of the file
+    - **include_metadata**: Whether to include file metadata
+    - **format_type**: Format type ("structured", "flat", or "raw")
+    
+    Returns structured JSON data with records and metadata
+    """
+    try:
+        file_service = get_file_service()
+        result = await file_service.extract_json_data(
+            file_id=file_id,
+            include_metadata=include_metadata,
+            format_type=format_type
+        )
+        
+        if not result['success']:
+            status_code = result.get('status_code', 500)
+            raise HTTPException(
+                status_code=status_code,
+                detail=result.get('error', 'Failed to extract JSON data')
+            )
+        
+        return result['data']
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to extract JSON data: {str(e)}"
+        )
+
+
+@router.get("/{file_id}/json-summary")
+async def get_json_summary(file_id: str):
+    """
+    Get a JSON summary of the file data with analytics
+    
+    - **file_id**: UUID of the file
+    
+    Returns JSON summary with key metrics and sample data
+    """
+    try:
+        file_service = get_file_service()
+        result = await file_service.export_json_summary(file_id)
+        
+        if not result['success']:
+            status_code = result.get('status_code', 500)
+            raise HTTPException(
+                status_code=status_code,
+                detail=result.get('error', 'Failed to get JSON summary')
+            )
+        
+        return result['data']
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to get JSON summary: {str(e)}"
         )

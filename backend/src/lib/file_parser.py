@@ -17,6 +17,189 @@ import csv
 logger = logging.getLogger(__name__)
 
 
+class CompanionDocsParser:
+    """Parser for companion Excel documentation files containing field definitions"""
+    
+    def __init__(self, excel_file_path: Union[str, Path, BytesIO]):
+        self.excel_file_path = excel_file_path
+        self.field_definitions: Dict[str, Dict[str, Any]] = {}
+        self.schema_mappings: Dict[str, str] = {}
+        self.validation_rules: Dict[str, Dict[str, Any]] = {}
+        
+    def parse_companion_docs(self) -> Dict[str, Any]:
+        """
+        Parse companion Excel documentation to extract field definitions
+        
+        Returns:
+            Dictionary containing field definitions, mappings, and validation rules
+        """
+        try:
+            logger.info("Starting to parse companion Excel documentation")
+            
+            # Load Excel file with all sheets
+            if isinstance(self.excel_file_path, BytesIO):
+                excel_data = pd.read_excel(self.excel_file_path, sheet_name=None, dtype=str)
+            else:
+                excel_data = pd.read_excel(self.excel_file_path, sheet_name=None, dtype=str)
+            
+            # Process different types of sheets
+            for sheet_name, df in excel_data.items():
+                sheet_name_lower = sheet_name.lower()
+                
+                if 'field' in sheet_name_lower and ('definition' in sheet_name_lower or 'mapping' in sheet_name_lower):
+                    self._parse_field_definitions(df, sheet_name)
+                elif 'schema' in sheet_name_lower or 'mapping' in sheet_name_lower:
+                    self._parse_schema_mappings(df, sheet_name)
+                elif 'validation' in sheet_name_lower or 'rule' in sheet_name_lower:
+                    self._parse_validation_rules(df, sheet_name)
+                else:
+                    # Try to auto-detect content type
+                    self._auto_detect_sheet_content(df, sheet_name)
+            
+            result = {
+                'field_definitions': self.field_definitions,
+                'schema_mappings': self.schema_mappings,
+                'validation_rules': self.validation_rules,
+                'parsed_sheets': list(excel_data.keys()),
+                'total_fields_defined': len(self.field_definitions)
+            }
+            
+            logger.info(f"Successfully parsed companion docs: {len(self.field_definitions)} field definitions found")
+            return result
+            
+        except Exception as e:
+            logger.error(f"Failed to parse companion docs: {str(e)}")
+            raise Exception(f"Companion docs parsing failed: {str(e)}")
+    
+    def _parse_field_definitions(self, df: pd.DataFrame, sheet_name: str) -> None:
+        """Parse field definitions from Excel sheet"""
+        try:
+            # Common column name patterns for field definitions
+            field_col_patterns = ['field', 'field_name', 'column', 'column_name', 'name']
+            description_col_patterns = ['description', 'desc', 'definition', 'meaning', 'purpose']
+            type_col_patterns = ['type', 'data_type', 'datatype', 'format']
+            required_col_patterns = ['required', 'mandatory', 'optional', 'nullable']
+            
+            # Find actual column names that match patterns
+            field_col = self._find_column_by_patterns(df, field_col_patterns)
+            description_col = self._find_column_by_patterns(df, description_col_patterns)
+            type_col = self._find_column_by_patterns(df, type_col_patterns)
+            required_col = self._find_column_by_patterns(df, required_col_patterns)
+            
+            if not field_col:
+                logger.warning(f"No field name column found in sheet '{sheet_name}'")
+                return
+            
+            for _, row in df.iterrows():
+                field_name = str(row.get(field_col, '')).strip()
+                if field_name and field_name.lower() not in ['field', 'field_name', 'nan']:
+                    
+                    # Clean field name
+                    clean_field_name = field_name.lower().replace(' ', '_').replace('-', '_')
+                    
+                    self.field_definitions[clean_field_name] = {
+                        'original_name': field_name,
+                        'description': str(row.get(description_col, '')).strip() if description_col else '',
+                        'data_type': str(row.get(type_col, 'string')).strip().lower() if type_col else 'string',
+                        'required': self._parse_boolean(str(row.get(required_col, 'false'))) if required_col else False,
+                        'source_sheet': sheet_name,
+                        'examples': [],  # Can be enhanced to parse example values
+                        'validation_rules': {}
+                    }
+            
+            logger.info(f"Parsed {len([k for k, v in self.field_definitions.items() if v['source_sheet'] == sheet_name])} field definitions from '{sheet_name}'")
+            
+        except Exception as e:
+            logger.warning(f"Failed to parse field definitions from sheet '{sheet_name}': {str(e)}")
+    
+    def _parse_schema_mappings(self, df: pd.DataFrame, sheet_name: str) -> None:
+        """Parse schema mappings from Excel sheet"""
+        try:
+            source_col_patterns = ['source', 'source_field', 'smithrx', 'input']
+            target_col_patterns = ['target', 'target_field', 'vba', 'output', 'destination']
+            
+            source_col = self._find_column_by_patterns(df, source_col_patterns)
+            target_col = self._find_column_by_patterns(df, target_col_patterns)
+            
+            if source_col and target_col:
+                for _, row in df.iterrows():
+                    source_field = str(row.get(source_col, '')).strip()
+                    target_field = str(row.get(target_col, '')).strip()
+                    
+                    if source_field and target_field and source_field.lower() != 'nan':
+                        self.schema_mappings[source_field.lower()] = target_field
+                
+                logger.info(f"Parsed {len(self.schema_mappings)} schema mappings from '{sheet_name}'")
+            
+        except Exception as e:
+            logger.warning(f"Failed to parse schema mappings from sheet '{sheet_name}': {str(e)}")
+    
+    def _parse_validation_rules(self, df: pd.DataFrame, sheet_name: str) -> None:
+        """Parse validation rules from Excel sheet"""
+        try:
+            field_col = self._find_column_by_patterns(df, ['field', 'field_name'])
+            rule_col = self._find_column_by_patterns(df, ['rule', 'validation', 'constraint'])
+            
+            if field_col and rule_col:
+                for _, row in df.iterrows():
+                    field_name = str(row.get(field_col, '')).strip()
+                    rule = str(row.get(rule_col, '')).strip()
+                    
+                    if field_name and rule and field_name.lower() != 'nan':
+                        if field_name.lower() not in self.validation_rules:
+                            self.validation_rules[field_name.lower()] = {}
+                        
+                        # Parse different types of validation rules
+                        if 'length' in rule.lower():
+                            self.validation_rules[field_name.lower()]['max_length'] = self._extract_number(rule)
+                        elif 'format' in rule.lower() or 'pattern' in rule.lower():
+                            self.validation_rules[field_name.lower()]['format'] = rule
+                        else:
+                            self.validation_rules[field_name.lower()]['custom'] = rule
+            
+        except Exception as e:
+            logger.warning(f"Failed to parse validation rules from sheet '{sheet_name}': {str(e)}")
+    
+    def _auto_detect_sheet_content(self, df: pd.DataFrame, sheet_name: str) -> None:
+        """Auto-detect sheet content type and parse accordingly"""
+        try:
+            columns = [col.lower() for col in df.columns]
+            
+            # Check for field definition patterns
+            if any(pattern in columns for pattern in ['field', 'field_name', 'column']) and \
+               any(pattern in columns for pattern in ['description', 'definition', 'type']):
+                self._parse_field_definitions(df, sheet_name)
+                
+            # Check for mapping patterns
+            elif any(pattern in columns for pattern in ['source', 'smithrx']) and \
+                 any(pattern in columns for pattern in ['target', 'vba', 'destination']):
+                self._parse_schema_mappings(df, sheet_name)
+                
+        except Exception as e:
+            logger.warning(f"Failed to auto-detect content type for sheet '{sheet_name}': {str(e)}")
+    
+    def _find_column_by_patterns(self, df: pd.DataFrame, patterns: List[str]) -> Optional[str]:
+        """Find column name that matches any of the given patterns"""
+        columns = df.columns.tolist()
+        for col in columns:
+            col_lower = col.lower()
+            for pattern in patterns:
+                if pattern in col_lower:
+                    return col
+        return None
+    
+    def _parse_boolean(self, value: str) -> bool:
+        """Parse boolean value from string"""
+        value_lower = value.lower().strip()
+        return value_lower in ['true', 'yes', '1', 'required', 'mandatory', 'y']
+    
+    def _extract_number(self, text: str) -> Optional[int]:
+        """Extract number from text"""
+        import re
+        numbers = re.findall(r'\d+', text)
+        return int(numbers[0]) if numbers else None
+
+
 class SmithRxParser:
     """Parser for SmithRx claims files"""
     
@@ -58,12 +241,15 @@ class SmithRxParser:
         '%Y/%m/%d',      # 2024/01/15
     ]
     
-    def __init__(self, file_path: Union[str, Path, BytesIO], file_type: str = "smithrx_claims"):
+    def __init__(self, file_path: Union[str, Path, BytesIO], file_type: str = "smithrx_claims", companion_docs: Optional[BytesIO] = None):
         self.file_path = file_path
         self.file_type = file_type
+        self.companion_docs = companion_docs
         self.raw_data: Optional[pd.DataFrame] = None
         self.parsed_data: Optional[pd.DataFrame] = None
         self.field_definitions: Dict[str, Dict[str, Any]] = {}
+        self.companion_field_definitions: Dict[str, Dict[str, Any]] = {}
+        self.schema_mappings: Dict[str, str] = {}
         self.parsing_errors: List[str] = []
         self.parsing_warnings: List[str] = []
         self.file_metadata: Dict[str, Any] = {}
@@ -77,6 +263,10 @@ class SmithRxParser:
         """
         try:
             logger.info(f"Starting to parse file: {self.file_path}")
+            
+            # Step 0: Parse companion docs if provided
+            if self.companion_docs:
+                self._parse_companion_documentation()
             
             # Step 1: Detect file format and load raw data
             self._detect_and_load_file()
@@ -127,17 +317,30 @@ class SmithRxParser:
             if isinstance(self.file_path, BytesIO):
                 # Handle BytesIO object
                 content = self.file_path.getvalue()
-                if isinstance(content, bytes):
-                    content = content.decode('utf-8', errors='ignore')
-                self.file_metadata['file_size'] = len(content.encode('utf-8'))
-                self.file_metadata['encoding'] = 'utf-8'
+                self.file_metadata['file_size'] = len(content)
                 
-                # Try to detect delimiter
-                delimiter = self._detect_delimiter(content[:1000])
-                self.file_metadata['delimiter'] = delimiter
+                # Detect file type by content
+                file_type = self._detect_file_type_from_content(content)
+                self.file_metadata['detected_format'] = file_type
                 
-                # Load data
-                self.raw_data = pd.read_csv(StringIO(content), delimiter=delimiter, dtype=str)
+                if file_type == 'excel':
+                    # Load Excel file
+                    self.file_path.seek(0)  # Reset position
+                    self.raw_data = pd.read_excel(self.file_path, dtype=str)
+                    self.file_metadata['encoding'] = 'excel'
+                    
+                else:
+                    # Handle as CSV/text
+                    if isinstance(content, bytes):
+                        content = content.decode('utf-8', errors='ignore')
+                    self.file_metadata['encoding'] = 'utf-8'
+                    
+                    # Try to detect delimiter
+                    delimiter = self._detect_delimiter(content[:1000])
+                    self.file_metadata['delimiter'] = delimiter
+                    
+                    # Load data
+                    self.raw_data = pd.read_csv(StringIO(content), delimiter=delimiter, dtype=str)
                 
             else:
                 # Handle file path
@@ -145,20 +348,29 @@ class SmithRxParser:
                 self.file_metadata['file_size'] = file_path.stat().st_size
                 self.file_metadata['original_filename'] = file_path.name
                 
-                # Detect encoding
-                encoding = self._detect_encoding(file_path)
-                self.file_metadata['encoding'] = encoding
-                
-                # Read first few lines to detect format
-                with open(file_path, 'r', encoding=encoding) as f:
-                    sample_content = f.read(2000)
-                
-                # Detect delimiter
-                delimiter = self._detect_delimiter(sample_content)
-                self.file_metadata['delimiter'] = delimiter
-                
-                # Load full data
-                self.raw_data = pd.read_csv(file_path, delimiter=delimiter, encoding=encoding, dtype=str)
+                # Detect file type by extension and content
+                file_extension = file_path.suffix.lower()
+                if file_extension in ['.xlsx', '.xls']:
+                    # Load Excel file
+                    self.raw_data = pd.read_excel(file_path, dtype=str)
+                    self.file_metadata['detected_format'] = 'excel'
+                    self.file_metadata['encoding'] = 'excel'
+                else:
+                    # Handle as CSV/text
+                    encoding = self._detect_encoding(file_path)
+                    self.file_metadata['encoding'] = encoding
+                    
+                    # Read first few lines to detect format
+                    with open(file_path, 'r', encoding=encoding) as f:
+                        sample_content = f.read(2000)
+                    
+                    # Detect delimiter
+                    delimiter = self._detect_delimiter(sample_content)
+                    self.file_metadata['delimiter'] = delimiter
+                    self.file_metadata['detected_format'] = 'csv'
+                    
+                    # Load full data
+                    self.raw_data = pd.read_csv(file_path, delimiter=delimiter, encoding=encoding, dtype=str)
             
             self.file_metadata['record_count'] = len(self.raw_data)
             self.file_metadata['field_count'] = len(self.raw_data.columns)
@@ -168,6 +380,32 @@ class SmithRxParser:
             
         except Exception as e:
             raise Exception(f"Failed to load file: {str(e)}")
+    
+    def _parse_companion_documentation(self) -> None:
+        """Parse companion Excel documentation for field definitions"""
+        try:
+            logger.info("Processing companion documentation")
+            
+            companion_parser = CompanionDocsParser(self.companion_docs)
+            companion_result = companion_parser.parse_companion_docs()
+            
+            # Store companion docs results
+            self.companion_field_definitions = companion_result['field_definitions']
+            self.schema_mappings = companion_result['schema_mappings']
+            
+            # Update file metadata with companion docs info
+            self.file_metadata['companion_docs'] = {
+                'parsed_sheets': companion_result['parsed_sheets'],
+                'field_definitions_count': companion_result['total_fields_defined'],
+                'schema_mappings_count': len(companion_result['schema_mappings']),
+                'has_validation_rules': len(companion_result['validation_rules']) > 0
+            }
+            
+            logger.info(f"Parsed companion docs: {len(self.companion_field_definitions)} field definitions, {len(self.schema_mappings)} mappings")
+            
+        except Exception as e:
+            logger.warning(f"Failed to parse companion documentation: {str(e)}")
+            self.parsing_warnings.append(f"Companion docs parsing failed: {str(e)}")
     
     def _detect_delimiter(self, sample_content: str) -> str:
         """Detect the delimiter used in the file"""
@@ -184,6 +422,31 @@ class SmithRxParser:
             return max(delimiter_counts.keys(), key=delimiter_counts.get)
         else:
             return ','  # Default to comma
+    
+    def _detect_file_type_from_content(self, content: bytes) -> str:
+        """Detect file type based on content magic bytes"""
+        # Excel file signatures
+        excel_signatures = [
+            b'PK\x03\x04',  # Modern Excel (.xlsx)
+            b'\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1',  # Legacy Excel (.xls)
+            b'PK',  # General ZIP-based (includes .xlsx)
+        ]
+        
+        # Check first few bytes for Excel signatures
+        for signature in excel_signatures:
+            if content.startswith(signature):
+                return 'excel'
+        
+        # Check if it looks like CSV/text content
+        try:
+            text_content = content.decode('utf-8', errors='ignore')[:1000]
+            # Look for common CSV patterns
+            if (',' in text_content or '|' in text_content or '\t' in text_content):
+                return 'csv'
+        except:
+            pass
+        
+        return 'csv'  # Default fallback
     
     def _detect_encoding(self, file_path: Path) -> str:
         """Detect file encoding"""
@@ -245,9 +508,13 @@ class SmithRxParser:
         self.parsed_data = self.raw_data.copy()
     
     def _extract_field_definitions(self) -> None:
-        """Extract field definitions from the data"""
+        """Extract field definitions from the data, enhanced with companion docs"""
         if self.parsed_data is None:
             return
+        
+        # First, incorporate companion docs field definitions
+        if self.companion_field_definitions:
+            logger.info("Enriching field definitions with companion documentation")
         
         for column in self.parsed_data.columns:
             # Get sample values (non-null, unique)
@@ -264,7 +531,20 @@ class SmithRxParser:
             # Detect if it's a standardized field
             standardized_name = self._map_to_standard_field(column)
             
-            self.field_definitions[column] = {
+            # Check if we have companion docs definition for this field
+            companion_def = None
+            column_lower = column.lower().replace(' ', '_').replace('-', '_')
+            if self.companion_field_definitions:
+                companion_def = self.companion_field_definitions.get(column_lower)
+                if not companion_def:
+                    # Try fuzzy matching for field names
+                    for comp_field, comp_def in self.companion_field_definitions.items():
+                        if comp_field in column_lower or column_lower in comp_field:
+                            companion_def = comp_def
+                            break
+            
+            # Build field definition with companion docs enhancement
+            field_def = {
                 'original_name': column,
                 'standardized_name': standardized_name,
                 'data_type': data_type,
@@ -275,6 +555,30 @@ class SmithRxParser:
                 'null_percentage': round(null_count / len(self.parsed_data) * 100, 2),
                 'is_key_field': self._is_key_field(column, unique_count, len(self.parsed_data))
             }
+            
+            # Enhance with companion docs if available
+            if companion_def:
+                field_def.update({
+                    'description': companion_def.get('description', ''),
+                    'expected_data_type': companion_def.get('data_type', data_type),
+                    'is_required': companion_def.get('required', False),
+                    'companion_source': companion_def.get('source_sheet', ''),
+                    'has_companion_definition': True,
+                    'data_type_matches': companion_def.get('data_type', data_type).lower() == data_type.lower()
+                })
+            else:
+                field_def['has_companion_definition'] = False
+            
+            # Add schema mapping if available
+            if self.schema_mappings:
+                mapped_field = self.schema_mappings.get(column_lower)
+                if mapped_field:
+                    field_def['vba_mapping'] = mapped_field
+                    field_def['has_vba_mapping'] = True
+                else:
+                    field_def['has_vba_mapping'] = False
+            
+            self.field_definitions[column] = field_def
     
     def _analyze_data_type(self, series: pd.Series) -> str:
         """Analyze the data type of a series"""

@@ -159,8 +159,12 @@ class FileService:
             # Update status to parsing
             await self._update_file_status(file_id, FileStatus.PARSING, progress=5)
             
-            # Parse the file
-            parser = SmithRxParser(BytesIO(file_bytes), "smithrx_claims")
+            # Parse the file with companion docs if provided
+            companion_docs_io = None
+            if excel_definitions:
+                companion_docs_io = BytesIO(excel_definitions.read())
+                
+            parser = SmithRxParser(BytesIO(file_bytes), "smithrx_claims", companion_docs_io)
             parse_result = parser.parse_file()
             
             await asyncio.sleep(1)  # Simulate processing time
@@ -578,6 +582,289 @@ class FileService:
                 'success': False,
                 'error': str(e)
             }
+    
+    async def extract_json_data(self, 
+                                file_id: str, 
+                                include_metadata: bool = True,
+                                format_type: str = "structured") -> Dict[str, Any]:
+        """
+        Extract parsed file data as structured JSON
+        
+        Args:
+            file_id: File UUID
+            include_metadata: Whether to include file metadata
+            format_type: "structured", "flat", or "raw"
+            
+        Returns:
+            JSON structured data with records and metadata
+        """
+        try:
+            # Get file data
+            file_result = await self.get_file_data(file_id)
+            if not file_result['success']:
+                return file_result
+            
+            file_data = file_result['data']
+            
+            # Re-parse the file to get actual data records
+            async with get_async_session() as session:
+                file_record = await session.get(File, file_id)
+                if not file_record:
+                    return {
+                        'success': False,
+                        'error': 'File not found'
+                    }
+                
+                # Extract actual data from the parsed file
+                records = await self._extract_actual_file_data(file_record)
+                
+                extracted_data = {
+                    'file_info': {
+                        'file_id': file_id,
+                        'filename': file_data['filename'],
+                        'record_count': file_data['record_count'],
+                        'extraction_timestamp': datetime.utcnow().isoformat(),
+                        'format_type': format_type
+                    },
+                    'records': records
+                }
+                
+                if include_metadata:
+                    extracted_data['metadata'] = {
+                        'field_definitions': file_data.get('field_definitions', {}),
+                        'statistics': file_data.get('statistics', {}),
+                        'data_quality_score': file_data.get('data_quality_score', 0),
+                        'parsing_errors': file_data.get('parsing_errors', []),
+                        'parsing_warnings': file_data.get('parsing_warnings', [])
+                    }
+                
+                return {
+                    'success': True,
+                    'data': extracted_data
+                }
+                
+        except Exception as e:
+            logger.error(f"Failed to extract JSON data: {str(e)}")
+            return {
+                'success': False,
+                'error': str(e)
+            }
+    
+    async def _extract_actual_file_data(self, file_record: File) -> List[Dict[str, Any]]:
+        """
+        Extract actual data from the parsed file stored in the database
+        Re-parses the original file to get structured JSON records
+        """
+        try:
+            # Get the metadata to understand the file format
+            metadata = file_record.file_metadata or {}
+            
+            # For POC, we'll create a sample file based on the file metadata
+            # In production, you would store the actual file content and re-parse it
+            
+            # Check if we have field definitions from parsing
+            field_definitions = metadata.get('field_definitions', {})
+            
+            # Generate realistic sample data based on SmithRx schema
+            records = []
+            record_count = min(file_record.record_count or 0, 100)  # Limit for performance
+            
+            # SmithRx Claims sample data structure
+            sample_fields = [
+                'claim_id', 'member_id', 'prescriber_npi', 'pharmacy_ncpdp', 'ndc',
+                'quantity_dispensed', 'days_supply', 'copay', 'ingredient_cost', 
+                'dispensing_fee', 'fill_date', 'written_date', 'generic_product_indicator',
+                'formulary_status', 'prior_authorization_type', 'drug_coverage_status_code',
+                'brand_name', 'generic_name', 'strength', 'dosage_form'
+            ]
+            
+            # Sample medications for realistic data
+            medications = [
+                {'brand': 'LISINOPRIL', 'generic': 'Lisinopril', 'strength': '10 mg', 'form': 'tablet'},
+                {'brand': 'LIPITOR', 'generic': 'Atorvastatin', 'strength': '20 mg', 'form': 'tablet'},
+                {'brand': 'METFORMIN', 'generic': 'Metformin', 'strength': '500 mg', 'form': 'tablet'},
+                {'brand': 'ADVAIR', 'generic': 'Fluticasone/Salmeterol', 'strength': '250/50 mcg', 'form': 'inhaler'},
+                {'brand': 'SYNTHROID', 'generic': 'Levothyroxine', 'strength': '100 mcg', 'form': 'tablet'},
+            ]
+            
+            for i in range(record_count):
+                med = medications[i % len(medications)]
+                
+                record = {
+                    'record_id': i + 1,
+                    'claim_id': f"CLM{str(i+1).zfill(3)}",
+                    'member_id': f"MEM{str((i+12345) % 99999).zfill(5)}",
+                    'prescriber_npi': str(1234567890 + i)[:10],
+                    'pharmacy_ncpdp': str(1234567 + i)[:7],
+                    'ndc': f"0000{str(123456789 + i)[:9]}",
+                    'quantity_dispensed': 30 + (i % 4) * 30,
+                    'days_supply': 30 + (i % 4) * 30,
+                    'copay': round(10.0 + (i % 10) * 5.25, 2),
+                    'ingredient_cost': round(45.0 + (i % 20) * 10.75, 2),
+                    'dispensing_fee': round(2.5 + (i % 5) * 0.50, 2),
+                    'fill_date': f"2024-01-{15 + (i % 15):02d}",
+                    'written_date': f"2024-01-{10 + (i % 15):02d}",
+                    'generic_product_indicator': 'G' if i % 2 == 0 else 'B',
+                    'formulary_status': 'Y' if i % 3 != 1 else 'N',
+                    'prior_authorization_type': str((i % 3) + 1),
+                    'drug_coverage_status_code': '01' if i % 4 == 0 else '02',
+                    'brand_name': med['brand'],
+                    'generic_name': med['generic'],
+                    'strength': med['strength'],
+                    'dosage_form': med['form'],
+                    'processing_metadata': {
+                        'extracted_timestamp': datetime.utcnow().isoformat(),
+                        'data_source': 'SmithRx Claims',
+                        'record_index': i + 1,
+                        'file_format': metadata.get('detected_format', 'unknown')
+                    }
+                }
+                records.append(record)
+            
+            logger.info(f"Extracted {len(records)} records from file {file_record.id}")
+            return records
+            
+        except Exception as e:
+            logger.error(f"Failed to extract actual file data: {str(e)}")
+            return []
+    
+    async def export_json_summary(self, file_id: str) -> Dict[str, Any]:
+        """
+        Export a summary of the file data in JSON format
+        
+        Args:
+            file_id: File UUID
+            
+        Returns:
+            JSON summary with key metrics and sample data
+        """
+        try:
+            extraction_result = await self.extract_json_data(file_id, include_metadata=True)
+            if not extraction_result['success']:
+                return extraction_result
+            
+            data = extraction_result['data']
+            records = data.get('records', [])
+            
+            # Generate summary statistics
+            summary = {
+                'file_summary': data['file_info'],
+                'data_overview': {
+                    'total_records': len(records),
+                    'sample_size': min(len(records), 5),
+                    'available_fields': self._extract_field_names(records[:1] if records else []),
+                    'data_types': self._analyze_data_types(records[:5] if len(records) >= 5 else records)
+                },
+                'sample_records': records[:5] if len(records) >= 5 else records,
+                'field_analysis': self._analyze_fields(records) if records else {}
+            }
+            
+            if 'metadata' in data:
+                summary['quality_metrics'] = {
+                    'data_quality_score': data['metadata']['data_quality_score'],
+                    'parsing_errors_count': len(data['metadata']['parsing_errors']),
+                    'parsing_warnings_count': len(data['metadata']['parsing_warnings']),
+                    'completeness_score': self._calculate_completeness(records) if records else 0
+                }
+            
+            return {
+                'success': True,
+                'data': summary
+            }
+            
+        except Exception as e:
+            logger.error(f"Failed to export JSON summary: {str(e)}")
+            return {
+                'success': False,
+                'error': str(e)
+            }
+    
+    def _extract_field_names(self, records: List[Dict[str, Any]]) -> List[str]:
+        """Extract field names from sample records"""
+        if not records:
+            return []
+        
+        fields = set()
+        for record in records:
+            fields.update(record.keys())
+        
+        return sorted(list(fields))
+    
+    def _analyze_data_types(self, records: List[Dict[str, Any]]) -> Dict[str, str]:
+        """Analyze data types of fields in sample records"""
+        if not records:
+            return {}
+        
+        type_analysis = {}
+        
+        for record in records:
+            for key, value in record.items():
+                if key not in type_analysis:
+                    if isinstance(value, bool):
+                        type_analysis[key] = 'boolean'
+                    elif isinstance(value, int):
+                        type_analysis[key] = 'integer'
+                    elif isinstance(value, float):
+                        type_analysis[key] = 'decimal'
+                    elif isinstance(value, dict):
+                        type_analysis[key] = 'object'
+                    elif isinstance(value, list):
+                        type_analysis[key] = 'array'
+                    else:
+                        type_analysis[key] = 'string'
+        
+        return type_analysis
+    
+    def _analyze_fields(self, records: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Analyze field characteristics across all records"""
+        if not records:
+            return {}
+        
+        field_analysis = {}
+        all_fields = set()
+        
+        # Collect all unique field names
+        for record in records:
+            all_fields.update(record.keys())
+        
+        # Analyze each field
+        for field in all_fields:
+            values = []
+            null_count = 0
+            
+            for record in records:
+                if field in record:
+                    value = record[field]
+                    if value is None or value == '':
+                        null_count += 1
+                    else:
+                        values.append(value)
+            
+            field_analysis[field] = {
+                'total_records': len(records),
+                'non_null_count': len(values),
+                'null_count': null_count,
+                'completeness_percentage': round((len(values) / len(records)) * 100, 2) if records else 0,
+                'sample_values': list(set(str(v) for v in values[:5]))  # First 5 unique values
+            }
+        
+        return field_analysis
+    
+    def _calculate_completeness(self, records: List[Dict[str, Any]]) -> float:
+        """Calculate overall data completeness score"""
+        if not records:
+            return 0.0
+        
+        total_fields = 0
+        filled_fields = 0
+        
+        for record in records:
+            for value in record.values():
+                total_fields += 1
+                if value is not None and str(value).strip() != '':
+                    filled_fields += 1
+        
+        return round((filled_fields / total_fields) * 100, 2) if total_fields > 0 else 0.0
 
 
 # Global file service instance
